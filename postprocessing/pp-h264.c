@@ -58,7 +58,7 @@ static AVCodecContext *vEncoder;
 static int max_width = 0, max_height = 0, fps = 0;
 
 
-int janus_pp_h264_create(char *destination) {
+int janus_pp_h264_create(char *destination, char *metadata, gboolean faststart) {
 	if(destination == NULL)
 		return -1;
 	/* Setup FFmpeg */
@@ -76,6 +76,9 @@ int janus_pp_h264_create(char *destination) {
 		JANUS_LOG(LOG_ERR, "Error allocating context\n");
 		return -1;
 	}
+	/* We save the metadata part as a comment (see #1189) */
+	if(metadata)
+		av_dict_set(&fctx->metadata, "comment", metadata, 0);
 	fctx->oformat = av_guess_format("mp4", NULL, NULL);
 	if(fctx->oformat == NULL) {
 		JANUS_LOG(LOG_ERR, "Error guessing format\n");
@@ -130,11 +133,15 @@ int janus_pp_h264_create(char *destination) {
 	//~ if (fctx->flags & AVFMT_GLOBALHEADER)
 		vStream->codec->flags |= CODEC_FLAG_GLOBAL_HEADER;
 #endif
-	if(avio_open(&fctx->pb, fctx->filename, AVIO_FLAG_WRITE) < 0) {
+	AVDictionary *options = NULL;
+	if(faststart)
+		av_dict_set(&options, "movflags", "+faststart", 0);
+
+	if(avio_open2(&fctx->pb, fctx->filename, AVIO_FLAG_WRITE, NULL, &options) < 0) {
 		JANUS_LOG(LOG_ERR, "Error opening file for output\n");
 		return -1;
 	}
-	if(avformat_write_header(fctx, NULL) < 0) {
+	if(avformat_write_header(fctx, &options) < 0) {
 		JANUS_LOG(LOG_ERR, "Error writing header\n");
 		return -1;
 	}
@@ -359,7 +366,7 @@ int janus_pp_h264_process(FILE *file, janus_pp_frame_packet *list, int *working)
 		keyFrame = 0;
 		frameLen = 0;
 		len = 0;
-		while(1) {
+		while(tmp != NULL) {
 			if(tmp->drop) {
 				/* Check if timestamp changes: marker bit is not mandatory, and may be lost as well */
 				if(tmp->next == NULL || tmp->next->ts > tmp->ts)
@@ -372,12 +379,16 @@ int janus_pp_h264_process(FILE *file, janus_pp_frame_packet *list, int *working)
 			fseek(file, tmp->offset+12+tmp->skip, SEEK_SET);
 			len = tmp->len-12-tmp->skip;
 			if(len < 1) {
+				if(tmp->next == NULL || tmp->next->ts > tmp->ts)
+					break;
 				tmp = tmp->next;
 				continue;
 			}
 			bytes = fread(buffer, sizeof(char), len, file);
 			if(bytes != len) {
 				JANUS_LOG(LOG_WARN, "Didn't manage to read all the bytes we needed (%d < %d)...\n", bytes, len);
+				if(tmp->next == NULL || tmp->next->ts > tmp->ts)
+					break;
 				tmp = tmp->next;
 				continue;
 			}
@@ -412,7 +423,6 @@ int janus_pp_h264_process(FILE *file, janus_pp_frame_packet *list, int *working)
 				buffer++;
 				int tot = len-1;
 				uint16_t psize = 0;
-				frameLen = 0;
 				while(tot > 0) {
 					memcpy(&psize, buffer, 2);
 					psize = ntohs(psize);
