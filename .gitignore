@@ -76,5 +76,4 @@ Makefile.in
 # CLion
 .idea
 
-# VSCode
 .vscode
